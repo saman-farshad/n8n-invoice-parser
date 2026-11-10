@@ -1,0 +1,11 @@
+Muster IT Service GmbH
+Musterstraße 15
+10115 Berlin
+
+Rechnungsnummer: RE-2026-104
+Rechnungsdatum: 05.11.2026
+
+Dienstleistung Softwarewartung 200,00 EUR
+MwSt 19%: 38,00 EUR
+Gesamtbetrag: 238,00 EUR
+IBAN: DE89 3704 0044 0532 0130 00

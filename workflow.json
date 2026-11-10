@@ -1,0 +1,201 @@
+{
+  "name": "Invoice Parser - German Invoices",
+  "nodes": [
+    {
+      "parameters": {
+        "httpMethod": "POST",
+        "path": "invoice-parser",
+        "responseMode": "responseNode",
+        "options": {}
+      },
+      "id": "e3b1cd6c-d403-50b6-8989-5840460c9621",
+      "name": "Invoice Webhook",
+      "type": "n8n-nodes-base.webhook",
+      "typeVersion": 2,
+      "position": [
+        240,
+        300
+      ],
+      "webhookId": "177be84d-75a5-5f0b-bb36-2cb9a1d40884"
+    },
+    {
+      "parameters": {
+        "jsCode": "const body = $input.first().json.body || {};\nconst invoice_text = String(body.text || body.invoice_text || '').replace(/\\r/g, '').trim();\n\nreturn [{json: {\n  invoice_text: invoice_text.slice(0, 20000),\n  input_ok: invoice_text.length >= 15,\n  truncated: invoice_text.length > 20000\n}}];\n",
+        "mode": "runOnceForAllItems"
+      },
+      "id": "625b445d-42e8-5ae7-8862-709e4ddc166b",
+      "name": "Prepare Invoice Text",
+      "type": "n8n-nodes-base.code",
+      "typeVersion": 2,
+      "position": [
+        460,
+        300
+      ]
+    },
+    {
+      "parameters": {
+        "jsCode": "const input = $input.first().json;\nconst invoice = input.invoice_text;\nconst lines = invoice.split('\\n').map(s => s.trim()).filter(Boolean);\n\nfunction find(pattern) {\n  const match = invoice.match(pattern);\n  return match ? match[1].trim() : null;\n}\nfunction money(value) {\n  if (!value) return null;\n  let cleaned = value.replace(/[^\\d.,]/g, '');\n  if (cleaned.includes(',')) cleaned = cleaned.replace(/\\./g, '').replace(',', '.');\n  else if ((cleaned.match(/\\./g) || []).length > 1) cleaned = cleaned.replace(/\\./g, '');\n  const number = Number(cleaned);\n  return Number.isFinite(number) ? Math.round(number * 100) / 100 : null;\n}\nfunction date_iso(value) {\n  if (!value) return null;\n  const match = value.match(/^(\\d{1,2})[.\\/-](\\d{1,2})[.\\/-](\\d{4})$/);\n  if (!match) return null;\n  const day = Number(match[1]);\n  const month = Number(match[2]);\n  const year = Number(match[3]);\n  const date = new Date(Date.UTC(year, month - 1, day));\n  if (date.getUTCDate() !== day || date.getUTCMonth() !== month - 1) return null;\n  return date.toISOString().slice(0, 10);\n}\n\nconst supplier = lines.find(line => !/^(rechnung|invoice|datum|date|seite|page)/i.test(line)) || null;\nconst invoice_no = find(/(?:Rechnungsnummer|Rechnungs[-\\s]?Nr\\.?|Invoice\\s*(?:number|no\\.?))\\s*[:#]?\\s*([A-Za-z0-9\\/-]{3,30})/i);\nconst date_text = find(/(?:Rechnungsdatum|Invoice\\s*Date|Datum|Date)\\s*[:\\-]?\\s*(\\d{1,2}[.\\/-]\\d{1,2}[.\\/-]\\d{4})/i);\nconst gross_text = find(/(?:Gesamtbetrag(?:\\s+brutto)?|Rechnungsbetrag|Bruttobetrag|Zu\\s+zahlen|Total|Summe\\s+brutto)\\s*[:=]?\\s*(?:EUR\\s*|€\\s*)?([\\d.,]+)/i);\nconst iban_match = invoice.match(/\\bDE(?:[\\s-]*\\d){20}\\b/i);\nconst iban = iban_match ? iban_match[0].replace(/[\\s-]/g, '').toUpperCase() : null;\nconst vat_match = invoice.match(/(?:MwSt\\.?|USt\\.?|Umsatzsteuer)\\s*(\\d{1,2})\\s*%\\s*[:=]?\\s*([\\d.,]+)/i);\n\nreturn [{json: {\n  supplier: supplier,\n  invoice_no: invoice_no,\n  invoice_date: date_iso(date_text),\n  gross_eur: money(gross_text),\n  vat_rate: vat_match ? Number(vat_match[1]) : null,\n  vat_eur: vat_match ? money(vat_match[2]) : null,\n  iban: iban,\n  input_ok: input.input_ok,\n  truncated: input.truncated\n}}];\n",
+        "mode": "runOnceForAllItems"
+      },
+      "id": "e4c93a7b-f5e0-5c83-baba-ca828d256816",
+      "name": "Extract Invoice Fields",
+      "type": "n8n-nodes-base.code",
+      "typeVersion": 2,
+      "position": [
+        690,
+        300
+      ]
+    },
+    {
+      "parameters": {
+        "jsCode": "const data = $input.first().json;\nconst errors = [];\nconst warnings = [];\n\nfunction valid_iban(iban) {\n  if (!iban || !/^DE\\d{20}$/.test(iban)) return false;\n  const moved = iban.slice(4) + iban.slice(0, 4);\n  let remainder = 0;\n  for (const character of moved) {\n    const digits = /[A-Z]/.test(character) ? String(character.charCodeAt(0) - 55) : character;\n    for (const digit of digits) remainder = (remainder * 10 + Number(digit)) % 97;\n  }\n  return remainder === 1;\n}\n\nif (!data.input_ok) errors.push('Invoice text is missing or too short');\nif (!data.supplier) errors.push('Supplier not found');\nif (!data.invoice_no) errors.push('Invoice number not found');\nif (!data.invoice_date) errors.push('Invoice date not found');\nif (data.gross_eur === null || data.gross_eur <= 0) errors.push('Total amount not found');\nif (data.iban && !valid_iban(data.iban)) warnings.push('IBAN checksum is invalid');\nif (!data.iban) warnings.push('No IBAN found');\nif (data.truncated) warnings.push('Input was shortened to 20000 characters');\nif (data.vat_rate !== null && data.vat_eur === null) warnings.push('VAT amount was not read');\n\nconst present = [data.supplier,data.invoice_no,data.invoice_date,data.gross_eur].filter(x => x !== null && x !== '').length;\nconst confidence = Math.max(0, Math.round((present / 4) * 100 - warnings.length * 5));\nconst needs_review = errors.length > 0 || warnings.includes('IBAN checksum is invalid');\n\nreturn [{json: {\n  project: 'invoice_parser',\n  status: needs_review ? 'needs_review' : 'ready',\n  needs_review: needs_review,\n  confidence: confidence,\n  invoice: {\n    supplier: data.supplier,\n    invoice_no: data.invoice_no,\n    invoice_date: data.invoice_date,\n    gross_eur: data.gross_eur,\n    vat_rate: data.vat_rate,\n    vat_eur: data.vat_eur,\n    iban: data.iban\n  },\n  errors: errors,\n  warnings: warnings\n}}];\n",
+        "mode": "runOnceForAllItems"
+      },
+      "id": "ced8a035-09c7-5364-883b-901612021882",
+      "name": "Check Invoice",
+      "type": "n8n-nodes-base.code",
+      "typeVersion": 2,
+      "position": [
+        920,
+        300
+      ]
+    },
+    {
+      "parameters": {
+        "conditions": {
+          "options": {
+            "caseSensitive": true,
+            "leftValue": "",
+            "typeValidation": "strict",
+            "version": 2
+          },
+          "combinator": "and",
+          "conditions": [
+            {
+              "id": "1d1e51a8-6d83-5b1d-bf5a-66ee6eb7b0c0",
+              "leftValue": "={{ $json.needs_review }}",
+              "rightValue": "",
+              "operator": {
+                "type": "boolean",
+                "operation": "true",
+                "singleValue": true
+              }
+            }
+          ]
+        },
+        "options": {}
+      },
+      "id": "b6cc7ead-0042-53fa-9f9e-c89dbb8452cd",
+      "name": "Needs Manual Review?",
+      "type": "n8n-nodes-base.if",
+      "typeVersion": 2.2,
+      "position": [
+        1140,
+        300
+      ]
+    },
+    {
+      "parameters": {
+        "respondWith": "firstIncomingItem",
+        "options": {
+          "responseCode": 200
+        }
+      },
+      "id": "379432fb-6f63-51b9-96e1-78ba187b2b12",
+      "name": "Return Review Result",
+      "type": "n8n-nodes-base.respondToWebhook",
+      "typeVersion": 1.4,
+      "position": [
+        1380,
+        190
+      ]
+    },
+    {
+      "parameters": {
+        "respondWith": "firstIncomingItem",
+        "options": {
+          "responseCode": 200
+        }
+      },
+      "id": "ba0a83f8-7b0d-5788-8b7c-4beb91e8da29",
+      "name": "Return Ready Result",
+      "type": "n8n-nodes-base.respondToWebhook",
+      "typeVersion": 1.4,
+      "position": [
+        1380,
+        420
+      ]
+    }
+  ],
+  "connections": {
+    "Invoice Webhook": {
+      "main": [
+        [
+          {
+            "node": "Prepare Invoice Text",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Prepare Invoice Text": {
+      "main": [
+        [
+          {
+            "node": "Extract Invoice Fields",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Extract Invoice Fields": {
+      "main": [
+        [
+          {
+            "node": "Check Invoice",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Check Invoice": {
+      "main": [
+        [
+          {
+            "node": "Needs Manual Review?",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Needs Manual Review?": {
+      "main": [
+        [
+          {
+            "node": "Return Review Result",
+            "type": "main",
+            "index": 0
+          }
+        ],
+        [
+          {
+            "node": "Return Ready Result",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    }
+  },
+  "settings": {
+    "executionOrder": "v1",
+    "timezone": "Europe/Berlin"
+  },
+  "pinData": {},
+  "active": false,
+  "tags": []
+}
